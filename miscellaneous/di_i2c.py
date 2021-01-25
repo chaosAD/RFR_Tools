@@ -483,15 +483,18 @@ class DI_I2C_RPI_SW(object):
         #time_start = time.time()
         #while (time.time() - time_start) < 0.000005:
         #    pass
+        i = 80
+        while i > 0:
+            i -= 1
+        #time.sleep(0.0000005)
 
-        #time.sleep(0.000005)
-
-        pass # Already enough time overhead. Return ASAP.
+        #pass # Already enough time overhead. Return ASAP.
 
     def __scl_high_check__(self):
         """ Allow SCL to go high, and wait until it's high. Timeout. """
 
         wiringpi.pinMode(3, self.INPUT) # SCL High
+###        self.__delay__()
         if not wiringpi.digitalRead(3): # SCL Read
             return self.__scl_check_timeout__()
         return self.SUCCESS
@@ -605,12 +608,12 @@ class DI_I2C_RPI_SW(object):
                 wiringpi.pinMode(2, self.INPUT) # SDA High
             else:
                 wiringpi.pinMode(2, self.OUTPUT) # SDA Low
-            #self.__delay__()
+            self.__delay__()
             wiringpi.pinMode(3, self.INPUT) # SCL High
             if not wiringpi.digitalRead(3): # SCL Read
                 if self.__scl_check_timeout__():
                     return self.ERROR_CLOCK_STRETCH_TIMEOUT
-            #self.__delay__()
+            self.__delay__()
         wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         wiringpi.pinMode(2, self.INPUT) # SDA High
         self.__delay__()
@@ -621,6 +624,7 @@ class DI_I2C_RPI_SW(object):
         if wiringpi.digitalRead(2): # SDA Read. check for ACK
             result = self.ERROR_NACK
         wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+        self.__delay__()
         return result
 
     def __read_byte__(self, ack):
@@ -637,7 +641,7 @@ class DI_I2C_RPI_SW(object):
                     return self.ERROR_CLOCK_STRETCH_TIMEOUT
             if wiringpi.digitalRead(2): # SDA Read
                 data |= (0x80 >> b)
-            #self.__delay__()
+            self.__delay__()
             wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         if ack != 0: # send ack?
             wiringpi.pinMode(2, self.OUTPUT) # SDA Low
@@ -646,4 +650,6 @@ class DI_I2C_RPI_SW(object):
         if self.__scl_high_check__():
             return self.ERROR_CLOCK_STRETCH_TIMEOUT, 0
         wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+        self.__delay__()
         return self.SUCCESS, data
+        
