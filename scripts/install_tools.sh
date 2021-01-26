@@ -166,7 +166,7 @@ clone_rfrtools_and_install_script_tools(){
   # otherwise, we'd have to deal with all the intricacies of git
   sudo rm -rf $RFRTOOLS
   pushd $DEXTER_LIB > /dev/null
-  git clone --quiet --depth=1 -b $selectedbranch https://github.com/DexterInd/RFR_Tools.git
+  git clone --quiet --depth=1 -b $selectedbranch https://github.com/chaosAD/RFR_Tools.git
   cd $RFRTOOLS
   # useful in case we need it
   current_branch=$(git branch | grep \* | cut -d ' ' -f2-)
