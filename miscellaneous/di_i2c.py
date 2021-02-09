@@ -474,8 +474,13 @@ class DI_I2C_RPI_SW(object):
             if result != self.SUCCESS:
                 raise IOError("[Errno 5] Input/output error")
             return value
-        else:
-            self.__restore_gpio_pins__()
+
+        self.__restore_gpio_pins__()
+
+    def __delay_between_bytes__(self):
+        i = 25
+        while i > 0:
+            i -= 1
 
     def __delay__(self):
         """ Delay called for slowing down the I2C clock to around 100kbps """
@@ -494,7 +499,7 @@ class DI_I2C_RPI_SW(object):
         """ Allow SCL to go high, and wait until it's high. Timeout. """
 
         wiringpi.pinMode(3, self.INPUT) # SCL High
-###        self.__delay__()
+        self.__delay__()
         if not wiringpi.digitalRead(3): # SCL Read
             return self.__scl_check_timeout__()
         return self.SUCCESS
@@ -506,7 +511,7 @@ class DI_I2C_RPI_SW(object):
         while not wiringpi.digitalRead(3): # SCL Read
             if (time.time() - time_start) > self.STRETCH_TIMEOUT:
                 return self.ERROR_CLOCK_STRETCH_TIMEOUT # timeout waiting for SCL to go high
-        #self.__delay__() # SCL is already high, just make sure it's high enough
+        self.__delay__() # SCL is already high, just make sure it's high enough
         return self.SUCCESS
 
     def __sda_high_check__(self):
@@ -518,7 +523,7 @@ class DI_I2C_RPI_SW(object):
         while not wiringpi.digitalRead(2): # SDA Read
             if time.time() - time_start > self.STRETCH_TIMEOUT:
                 return self.ERROR_DATA_STRETCH_TIMEOUT # timeout waiting for SDA to go high
-        #self.__delay__() # SDA is already high, just make sure it's high enough
+        self.__delay__() # SDA is already high, just make sure it's high enough
         return self.SUCCESS
 
     def __write__(self, addr, outArr, restart = False):
@@ -619,12 +624,11 @@ class DI_I2C_RPI_SW(object):
         self.__delay__()
         if self.__scl_high_check__():
             return self.ERROR_CLOCK_STRETCH_TIMEOUT
-
         result = self.SUCCESS
         if wiringpi.digitalRead(2): # SDA Read. check for ACK
             result = self.ERROR_NACK
         wiringpi.pinMode(3, self.OUTPUT) # SCL Low
-        self.__delay__()
+        self.__delay_between_bytes__()    # !!!FOR DEBUGGING!!!
         return result
 
     def __read_byte__(self, ack):
@@ -646,10 +650,11 @@ class DI_I2C_RPI_SW(object):
         if ack != 0: # send ack?
             wiringpi.pinMode(2, self.OUTPUT) # SDA Low
         else:
-            self.__delay__()
+            pass
+        self.__delay__()
         if self.__scl_high_check__():
             return self.ERROR_CLOCK_STRETCH_TIMEOUT, 0
         wiringpi.pinMode(3, self.OUTPUT) # SCL Low
-        self.__delay__()
+        self.__delay_between_bytes__()    # !!!FOR DEBUGGING!!!
         return self.SUCCESS, data
         
