@@ -425,7 +425,7 @@ class DI_I2C_RPI_SW(object):
     OUTPUT = 1
 
     # timeout if stretched for more than this long (in seconds)
-    STRETCH_TIMEOUT = 0.001
+    STRETCH_TIMEOUT = 0.1
 
     BusActive = False
 
