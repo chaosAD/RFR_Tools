@@ -91,6 +91,8 @@ class DI_I2C(object):
         self.mutex = di_mutex.DI_Mutex(name = ("I2C_Bus_" + bus))
         self.set_address(address)
         self.big_endian = big_endian
+        self.acquired_count = 0
+        self.released_count = 0
 
     def reconfig_bus(self):
         """Reconfigure I2C bus
@@ -127,6 +129,8 @@ class DI_I2C(object):
         inBytes = int(inBytes)
 
         self.mutex.acquire() # acquire the bus mutex
+        self.acquired_count += 1
+#        print('acquired: {}'.format(self.acquired_count))
 
         return_val = None
 
@@ -197,9 +201,15 @@ class DI_I2C(object):
                     raise IOError("[Errno 5] Input/output error")
         except:
             self.mutex.release() # release the bus mutex before raising the exception
+            self.released_count += 1
+#            if self.released_count != self.acquired_count:
+#            print('acquired:{}, released: {}'.format(self.acquired_count, self.released_count))
             raise # raise the exception for user-code to deal with
 
         self.mutex.release() # release the bus mutex
+        self.released_count += 1
+#        if self.released_count != self.acquired_count:
+#            print('acquired:{}, released: {}'.format(self.acquired_count, self.released_count))
         return return_val    # return data (if read)
 
     def write_8(self, val):
@@ -423,9 +433,11 @@ class DI_I2C_RPI_SW(object):
 
     INPUT = 0
     OUTPUT = 1
+    SDA = 2
+    SCL = 3
 
     # timeout if stretched for more than this long (in seconds)
-    STRETCH_TIMEOUT = 0.1
+    STRETCH_TIMEOUT = 0.02
 
     BusActive = False
 
@@ -438,43 +450,76 @@ class DI_I2C_RPI_SW(object):
         # Register the exit method
         atexit.register(self.__exit_cleanup__) # register the exit method
 
+    def __set_pin_mode__(self, pin, mode):
+        while True:
+            wiringpi.pinMode(pin, mode)
+            if wiringpi.getAlt(pin) != mode:
+                continue
+            break;
+
+    def __set_pin_mode_alt__(self, pin, mode):
+        while True:
+            wiringpi.pinModeAlt(pin, mode)
+            if wiringpi.getAlt(pin) != mode:
+                continue
+            break;
+
     def __set_gpio_pins__(self):
         """ Set pins as GPIO """
 
         self.BusActive = True
-        wiringpi.pinMode(3, self.INPUT) # set SCL pin as input
-        wiringpi.pinMode(2, self.INPUT) # set SDA pin as input
+        self.__set_pin_mode__(self.SCL, self.INPUT)
+        self.__set_pin_mode__(self.SDA, self.INPUT)
+#        wiringpi.pinMode(3, self.INPUT) # set SCL pin as input
+#        wiringpi.pinMode(2, self.INPUT) # set SDA pin as input
+        self.__delay__()
 
     def __restore_gpio_pins__(self):
         """ Restore HW I2C functionality on GPIO pins 2 & 3 """
-        
-        wiringpi.pinModeAlt(3, 4) # restore ALT0 functionality on SCL pin
-        wiringpi.pinModeAlt(2, 4) # restore ALT0 functionality on SDA pin
+        self.__set_pin_mode__(self.SCL, self.INPUT)
+        self.__set_pin_mode__(self.SDA, self.INPUT)
+#        wiringpi.pinMode(3, self.INPUT) # set SCL pin as input
+#        wiringpi.pinMode(2, self.INPUT) # set SDA pin as input
+        self.__delay__()
+        self.__set_pin_mode_alt__(self.SCL, 4)   # restore ALT0 functionality on SCL pi
+        self.__set_pin_mode_alt__(self.SDA, 4)   # restore ALT0 functionality on SDA pin
+#        wiringpi.pinModeAlt(3, 4) # restore ALT0 functionality on SCL pin
+#        wiringpi.pinModeAlt(2, 4) # restore ALT0 functionality on SDA pin
         self.BusActive = False
 
     def __exit_cleanup__(self):
         """ Called at exit to clean up """
-        
+
         if self.BusActive:
             self.__restore_gpio_pins__()
+
+    def __raise_error__(self, error_code):
+        if error_code != self.SUCCESS:
+            self.__restore_gpio_pins__()
+            if error_code == self.ERROR_NACK:
+                raise IOError("[Errno 5] Input/output error (NACK)")
+            elif error_code == self.ERROR_CLOCK_STRETCH_TIMEOUT:
+                raise IOError("[Errno 5] Input/output error (SCL stretch timeout)")
+            elif error_code == self.ERROR_DATA_STRETCH_TIMEOUT:
+                raise IOError("[Errno 5] Input/output error (SDA stretch timeout)")
+            else:
+                raise IOError("[Errno 5] Input/output error (SDA+SCL stretch timeout)")
 
     def transfer(self, addr, outArr, inBytes):
         """ Write and/or read I2C """
 
         self.__set_gpio_pins__()
-
+        result = self.__clock_until_sda_unlocked_if_needed__()
+        if result != self.SUCCESS:
+            self.__raise_error__(result)
         if(len(outArr) > 0): # bytes to write?
-            if self.__write__(addr, outArr, inBytes) != self.SUCCESS:
-                self.__restore_gpio_pins__()
-                raise IOError("[Errno 5] Input/output error")
-
+            result = self.__write__(addr, outArr, inBytes)
+            self.__raise_error__(result)
         if(inBytes > 0): # read bytes?
             result, value = self.__read__(addr, inBytes)
+            self.__raise_error__(result)         # Raise an exception if error encountered
             self.__restore_gpio_pins__()
-            if result != self.SUCCESS:
-                raise IOError("[Errno 5] Input/output error")
             return value
-
         self.__restore_gpio_pins__()
 
     def __delay_between_bytes__(self):
@@ -492,13 +537,42 @@ class DI_I2C_RPI_SW(object):
         while i > 0:
             i -= 1
         #time.sleep(0.0000005)
-
         #pass # Already enough time overhead. Return ASAP.
+
+    def __write_pin__(self, pin, state):
+#        wiringpi.digitalWrite(pin, 0)
+        counter = 0
+        if state == 0:
+#            for i in range(4):
+#                wiringpi.pinMode(pin, self.OUTPUT)   # Output a zero
+            while True:
+                wiringpi.pinMode(pin, self.OUTPUT)   # Output a zero
+                if wiringpi.getAlt(pin) != self.OUTPUT:
+                    counter += 1
+#                    print('#################pin {} is not OUTPUT ({} retries)'.format(pin, counter))
+                    continue
+                if wiringpi.digitalRead(pin) != 0:
+                    wiringpi.digitalWrite(pin, 0)
+                    counter += 1
+#                    print('#################pin {} is not LOW ({} retries)'.format(pin, counter))
+                    continue
+                break;
+        else:
+#            for i in range(4):
+#               wiringpi.pinMode(pin, self.INPUT)    # Output a one (open-drain)
+            while True:
+                wiringpi.pinMode(pin, self.INPUT)    # Output a one (open-drain)
+                if wiringpi.getAlt(pin) != self.INPUT:
+                    counter += 1
+#                    print('#################pin {} is not INPUT ({} retries)'.format(pin, counter))
+                    continue
+                break;
 
     def __scl_high_check__(self):
         """ Allow SCL to go high, and wait until it's high. Timeout. """
 
-        wiringpi.pinMode(3, self.INPUT) # SCL High
+        self.__write_pin__(self.SCL, 1)  # SCL High
+#        wiringpi.pinMode(3, self.INPUT) # SCL High
         self.__delay__()
         if not wiringpi.digitalRead(3): # SCL Read
             return self.__scl_check_timeout__()
@@ -506,23 +580,34 @@ class DI_I2C_RPI_SW(object):
 
     def __scl_check_timeout__(self):
         """ Wait until SCL is high, and timeout if it takes too long """
-
+#        counter = 0
         time_start = time.time()
         while not wiringpi.digitalRead(3): # SCL Read
             if (time.time() - time_start) > self.STRETCH_TIMEOUT:
                 return self.ERROR_CLOCK_STRETCH_TIMEOUT # timeout waiting for SCL to go high
+#             wiringpi.pinMode(3, self.INPUT)     # Try to release again (this really helps!!!)
+#             if counter > 500:
+#                 return self.ERROR_CLOCK_STRETCH_TIMEOUT # timeout waiting for SCL to go high
+#            counter += 1
+            self.__delay__()
         self.__delay__() # SCL is already high, just make sure it's high enough
         return self.SUCCESS
 
     def __sda_high_check__(self):
         """ Allow SDA to go high, and wait until it's high """
 
-        wiringpi.pinMode(2, self.INPUT) # SDA High
-        result = 0
+        self.__write_pin__(self.SDA, 1)  # SDA High
+#        wiringpi.pinMode(2, self.INPUT) # SDA High
+#        counter = 0
         time_start = time.time()
         while not wiringpi.digitalRead(2): # SDA Read
             if time.time() - time_start > self.STRETCH_TIMEOUT:
                 return self.ERROR_DATA_STRETCH_TIMEOUT # timeout waiting for SDA to go high
+#             wiringpi.pinMode(2, self.INPUT)     # Try to release again
+#             if counter > 500:
+#                 return self.ERROR_DATA_STRETCH_TIMEOUT # timeout waiting for SDA to go high
+#            counter += 1
+            self.__delay__()
         self.__delay__() # SDA is already high, just make sure it's high enough
         return self.SUCCESS
 
@@ -532,14 +617,20 @@ class DI_I2C_RPI_SW(object):
         outBuffer = [(addr << 1)] # left-shift I2C address and clear read bit
         outBuffer.extend(outArr) # outBuffer now contains the address and outArr
         self.__start__() # issue bus start
+ #       result = self.__start__() # issue bus start
+ #       if result != self.SUCCESS:
+ #           return result,
         for b in range(len(outBuffer)): # for each byte
             result = self.__write_byte__(outBuffer[b]) # write the byte
             if result != self.SUCCESS: # if an error
                 if result == self.ERROR_NACK: # if NACK
-                    self.__stop__()
+                    self.__proper_stop__()
+#                    self.__stop__()
                 else: # other error. Probably ERROR_CLOCK_STRETCH_TIMEOUT
-                    wiringpi.pinMode(3, self.INPUT) # SCL High
-                    wiringpi.pinMode(2, self.INPUT) # SDA High
+                    self.__proper_stop__()
+#                    wiringpi.pinMode(3, self.INPUT) # SCL High
+#                    wiringpi.pinMode(2, self.INPUT) # SDA High
+#                    self.__delay__()                # wait enough to let them go high
                 return result # return error
         if restart: # if a read is immediately following, issue a restart
             # SDA high then SCL high, with provisions for timeout
@@ -562,20 +653,28 @@ class DI_I2C_RPI_SW(object):
         inBuffer = []
 
         self.__start__() # issue bus start
+#        result = self.__start__() # issue bus start
+#        if result != self.SUCCESS:
+#            return result, inBuffer
         result = self.__write_byte__(addr) # write the address and read bit
         if result != self.SUCCESS: # check for error
             if result == self.ERROR_NACK: # if NACK
-                self.__stop__()
+                self.__proper_stop__()
+#                self.__stop__()
             else: # other error. Probably ERROR_CLOCK_STRETCH_TIMEOUT
-                wiringpi.pinMode(3, self.INPUT) # SCL High
-                wiringpi.pinMode(2, self.INPUT) # SDA High
+                self.__proper_stop__()
+#                wiringpi.pinMode(3, self.INPUT) # SCL High
+#                wiringpi.pinMode(2, self.INPUT) # SDA High
+#                self.__delay__()                # wait enough to let them go high
             return result, inBuffer
 
         for b in range(inBytes): # for each byte to read
             result, value = self.__read_byte__((inBytes - 1) - b) # read a byte, and ack all except the last
             if result != self.SUCCESS: # check for error
-                wiringpi.pinMode(3, self.INPUT) # SCL High
-                wiringpi.pinMode(2, self.INPUT) # SDA High
+                self.__proper_stop__()
+#                wiringpi.pinMode(3, self.INPUT) # SCL High
+#                wiringpi.pinMode(2, self.INPUT) # SDA High
+#                self.__delay__()                # wait enough to let them go high
                 return result, inBuffer # return error
             inBuffer.append(value) # append the read byte to inBuffer
 
@@ -585,13 +684,20 @@ class DI_I2C_RPI_SW(object):
     def __start__(self):
         """ Issue bus start sequence """
 
-        wiringpi.pinMode(2, self.OUTPUT) # SDA Low
+#        if self.__scl_high_check__():
+#            return self.ERROR_CLOCK_STRETCH_TIMEOUT
+#        if self.__sda_high_check__():
+#            return self.ERROR_DATA_STRETCH_TIMEOUT
+        self.__write_pin__(self.SDA, 0)
+#        wiringpi.pinMode(2, self.OUTPUT) # SDA Low
         self.__delay__()
+#        return self.SUCCESS
 
     def __stop__(self):
         """ Issue bus stop sequence """
 
-        wiringpi.pinMode(2, self.OUTPUT) # SDA Low
+        self.__write_pin__(self.SDA, 0)
+#        wiringpi.pinMode(2, self.OUTPUT) # SDA Low
         self.__delay__()
 
         # SCL high then SDA high, with provisions for timeout
@@ -604,57 +710,111 @@ class DI_I2C_RPI_SW(object):
 
         return self.SUCCESS
 
+    def __clock_until_sda_unlocked_if_needed__(self):
+        # Execute clocking sequence to force the slave out from its 'active'
+        # state machine if either SDA or SCL is low
+        if not wiringpi.digitalRead(3) or not wiringpi.digitalRead(2):
+            return self.__proper_stop__()
+        return self.SUCCESS
+
+    def __proper_stop__(self):
+        """
+            Issue bus stop sequence and making sure slave is properly clocked
+            out from its 'active' state machine. The implemetation below follows the
+            suggestion in the following PDF:
+            https://www.analog.com/media/en/technical-documentation/application-notes/54305147357414AN686_0.pdf
+            Another way is:
+            https://www.i2c-bus.org/i2c-primer/analysing-obscure-problems/blocked-bus/
+        """
+        counter = 0
+        self.__write_pin__(self.SDA, 0)
+#        wiringpi.pinMode(2, self.OUTPUT) # SDA Low
+        self.__delay__()
+        while True:
+            # SCL high then SDA high, with provisions for timeout
+            if self.__scl_high_check__():
+                if self.__sda_high_check__():
+#                    print('fail to free SCL+SDA')
+                    return self.ERROR_DATA_AND_CLOCK_STRETCH_TIMEOUT
+#                print('fail to free SCL')
+                return self.ERROR_CLOCK_STRETCH_TIMEOUT
+            self.__write_pin__(self.SDA, 1)
+#            wiringpi.pinMode(2, self.INPUT)      # SDA High
+            self.__delay__()
+            if not wiringpi.digitalRead(2):      # is SDA low still?
+                self.__write_pin__(self.SCL, 0)
+#                wiringpi.pinMode(3, self.OUTPUT) # Set SCL Low
+                self.__delay__()
+                counter += 1
+                if counter > 200:
+#                    print('fail to free SDA')
+                    return self.ERROR_DATA_STRETCH_TIMEOUT
+            else:
+                break
+#        print('successfully freed the I2C bus')
+        return self.SUCCESS
+
     def __write_byte__(self, val):
         """ Write a byte """
 
         for b in range(8):
-            wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+            self.__write_pin__(self.SCL, 0)
+#            wiringpi.pinMode(3, self.OUTPUT) # SCL Low
             if (0x80 >> b) & val:
-                wiringpi.pinMode(2, self.INPUT) # SDA High
+                self.__write_pin__(self.SDA, 1)
+#                wiringpi.pinMode(2, self.INPUT) # SDA High
             else:
-                wiringpi.pinMode(2, self.OUTPUT) # SDA Low
+                self.__write_pin__(self.SDA, 0)
+#                wiringpi.pinMode(2, self.OUTPUT) # SDA Low
             self.__delay__()
-            wiringpi.pinMode(3, self.INPUT) # SCL High
+            self.__write_pin__(self.SCL, 1)
+#            wiringpi.pinMode(3, self.INPUT) # SCL High
             if not wiringpi.digitalRead(3): # SCL Read
                 if self.__scl_check_timeout__():
                     return self.ERROR_CLOCK_STRETCH_TIMEOUT
             self.__delay__()
-        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
-        wiringpi.pinMode(2, self.INPUT) # SDA High
-        self.__delay__()
+#        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+#        wiringpi.pinMode(2, self.INPUT) # SDA High
+        self.__write_pin__(self.SCL, 0)
+        self.__write_pin__(self.SDA, 1)
         if self.__scl_high_check__():
             return self.ERROR_CLOCK_STRETCH_TIMEOUT
         result = self.SUCCESS
         if wiringpi.digitalRead(2): # SDA Read. check for ACK
             result = self.ERROR_NACK
-        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+        self.__write_pin__(self.SCL, 0)
+#        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         self.__delay_between_bytes__()    # !!!FOR DEBUGGING!!!
         return result
 
     def __read_byte__(self, ack):
         """ Read a byte """
 
-        wiringpi.pinMode(2, self.INPUT) # SDA High
+        self.__write_pin__(self.SDA, 1)
+#        wiringpi.pinMode(2, self.INPUT) # SDA High
         data = 0
-        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+        self.__write_pin__(self.SCL, 0)
+#        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         for b in range(8):
             self.__delay__()
-            wiringpi.pinMode(3, self.INPUT) # SCL High
+            self.__write_pin__(self.SCL, 1)
+#            wiringpi.pinMode(3, self.INPUT) # SCL High
             if not wiringpi.digitalRead(3): # SCL Read
                 if self.__scl_check_timeout__():
-                    return self.ERROR_CLOCK_STRETCH_TIMEOUT
+                    return self.ERROR_CLOCK_STRETCH_TIMEOUT, 0
             if wiringpi.digitalRead(2): # SDA Read
                 data |= (0x80 >> b)
             self.__delay__()
-            wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+            self.__write_pin__(self.SCL, 0)
+#            wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         if ack != 0: # send ack?
-            wiringpi.pinMode(2, self.OUTPUT) # SDA Low
-        else:
-            pass
+            self.__write_pin__(self.SDA, 0)
+#            wiringpi.pinMode(2, self.OUTPUT) # SDA Low
         self.__delay__()
         if self.__scl_high_check__():
             return self.ERROR_CLOCK_STRETCH_TIMEOUT, 0
-        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
+        self.__write_pin__(self.SCL, 0)
+#        wiringpi.pinMode(3, self.OUTPUT) # SCL Low
         self.__delay_between_bytes__()    # !!!FOR DEBUGGING!!!
         return self.SUCCESS, data
-        
+
